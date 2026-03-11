@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Block Blast Ultra</title>
+    <style>
+        :root { 
+            --accent: #00fbff; 
+            --bg: #05050a; 
+            --panel: rgba(255, 255, 255, 0.05);
+        }
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
+        body { 
+            margin: 0; padding: 0; background: var(--bg); color: white; 
+            font-family: 'SF Pro Display', system-ui, sans-serif;
+            overflow: hidden; touch-action: none; height: 100vh;
+            display: flex; justify-content: center; align-items: center;
+        }
+        canvas { display: block; z-index: 1; touch-action: none; }
+        
+        /* UI Layer */
+        .app-ui { position: fixed; inset: 0; pointer-events: none; z-index: 10; display: flex; flex-direction: column; }
+        .header { padding: env(safe-area-inset-top, 40px) 20px 0; text-align: center; }
+        #scoreLabel { font-size: 64px; font-weight: 900; margin: 0; text-shadow: 0 0 20px var(--accent); transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+        #bestScoreLabel { font-size: 14px; color: var(--accent); opacity: 0.7; letter-spacing: 2px; }
+        
+        /* Popups */
+        .overlay {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.85);
+            display: flex; flex-direction: column; justify-content: center;
+            align-items: center; z-index: 100; backdrop-filter: blur(15px); padding: 20px;
+            transition: opacity 0.3s;
+        }
+        .glass {
+            background: rgba(30, 30, 45, 0.7); border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 40px; padding: 40px; width: 100%; max-width: 350px; text-align: center;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+        }
+
+        /* Buttons & Controls */
+        button { 
+            width: 100%; padding: 20px; border-radius: 20px; border: none;
+            background: var(--accent); color: #000; font-weight: 800; font-size: 18px; margin: 8px 0;
+            transition: 0.2s; cursor: pointer; transform: scale(1);
+        }
+        button:active { transform: scale(0.92); }
+        .btn-sec { background: rgba(255,255,255,0.1); color: #fff; }
+
+        /* Skin Selector */
+        .skin-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 20px 0; }
+        .skin-item { 
+            height: 50px; border-radius: 12px; border: 2px solid transparent; 
+            cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold;
+        }
+        .skin-item.active { border-color: var(--accent); background: rgba(255,255,255,0.1); }
+
+        /* Floating Combo Text */
+        #comboNotice {
+            position: fixed; top: 40%; left: 50%; transform: translate(-50%, -50%);
+            font-size: 40px; font-weight: 900; color: #ff00ff;
+            text-shadow: 0 0 20px #ff00ff; pointer-events: none; opacity: 0; z-index: 1000;
+        }
+    </style>
+</head>
+<body onclick="initAudio()">
+
+    <div class="app-ui">
+        <div class="header">
+            <h1 id="scoreLabel">0</h1>
+            <div id="bestScoreLabel">BEST: 0</div>
+        </div>
+    </div>
+
+    <div id="comboNotice">AMAZING!</div>
+
+    <div id="uiMenu" class="overlay">
+        <div class="glass">
+            <h1 style="margin:0; font-size: 42px; letter-spacing: -1px;">BLOCK <span style="color:var(--accent)">ULTRA</span></h1>
+            <p style="opacity:0.5; margin-bottom: 20px;">VIBE & BLAST</p>
+            
+            <div class="skin-grid">
+                <div class="skin-item active" style="background:#00fbff; color:black" onclick="setSkin('neon', this)">NEON</div>
+                <div class="skin-item" style="background:#deb887; color:black" onclick="setSkin('wood', this)">WOOD</div>
+                <div class="skin-item" style="background:#ff69b4; color:black" onclick="setSkin('candy', this)">SWEET</div>
+            </div>
+
+            <button onclick="startGame()">START GAME</button>
+            <button class="btn-sec" onclick="toggleMusic()">MUSIC: ON/OFF</button>
+        </div>
+    </div>
+
+    <div id="uiGameOver" class="overlay" style="display:none;">
+        <div class="glass">
+            <h1 style="color:#ff00ff; margin:0">GAME OVER</h1>
+            <p id="finalScore" style="font-size: 72px; font-weight: 900; margin: 10px 0;">0</p>
+            <button onclick="startGame()">TRY AGAIN</button>
+            <button class="btn-sec" onclick="location.reload()">MENU</button>
+        </div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+/** * GAME CONFIG & STATE 
+ */
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const GRID_SIZE = 8;
+const SHAPES = [
+    [[1]], [[1,1]], [[1,1,1]], [[1,1,1,1]], [[1,1],[1,1]],
+    [[1,1,1],[0,1,0]], [[1,1,0],[0,1,1]], [[1,0],[1,1],[0,1]],
+    [[1,0],[1,0],[1,1]], [[1,1,1],[1,0,0]], [[1,1,1],[1,1,1],[1,1,1]]
+];
+
+let score = 0, bestScore = localStorage.getItem('ultra_best') || 0;
+let grid = [], hand = [], particles = [], floatingTexts = [];
+let isGameActive = false, shake = 0, combo = 0;
+let dragging = null, mouse = { x: 0, y: 0 };
+let view = { cellSize: 0, x: 0, y: 0, size: 0 };
+let currentSkin = 'neon';
+let audioCtx, masterGain;
+
+const SKINS = {
+    neon: { accent: '#00fbff', bg: '#05050a', radius: 8, gap: 4 },
+    wood: { accent: '#deb887', bg: '#2d1f14', radius: 4, gap: 2 },
+    candy: { accent: '#ff69b4', bg: '#1a0510', radius: 20, gap: 6 }
+};
+
+/**
+ * INITIALIZATION
+ */
+function init() {
+    window.addEventListener('resize', resize);
+    resize();
+    resetGrid();
+    document.getElementById('bestScoreLabel').innerText = `BEST: ${bestScore}`;
+    loop();
+}
+
+function resetGrid() {
+    grid = Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill(null));
+}
+
+function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = window.innerWidth * dpr;
+    canvas.height = window.innerHeight * dpr;
+    ctx.scale(dpr, dpr);
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+
+    const minDim = Math.min(window.innerWidth, window.innerHeight);
+    view.size = Math.min(window.innerWidth * 0.9, 400);
+    view.cellSize = view.size / GRID_SIZE;
+    view.x = (window.innerWidth - view.size) / 2;
+    view.y = window.innerHeight * 0.25;
+}
+
+/**
+ * LOGIC
+ */
+function spawnHand() {
+    hand = [];
+    for(let i=0; i<3; i++) {
+        let m = SHAPES[Math.floor(Math.random()*SHAPES.length)];
+        // Random rotation
+        const rots = Math.floor(Math.random()*4);
+        for(let r=0; r<rots; r++) m = m[0].map((_, idx) => m.map(row => row[idx]).reverse());
+        
+        hand.push({
+            m: m,
+            color: `hsl(${Math.random()*360}, 70%, 60%)`,
+            x: (window.innerWidth / 4) * (i + 1),
+            y: window.innerHeight - 120,
+            scale: 0.5,
+            active: true,
+            rot: 0
+        });
+    }
+    if (checkGameOver()) endGame();
+}
+
+function checkLines() {
+    let fullRows = [], fullCols = [];
+    for(let i=0; i<GRID_SIZE; i++) {
+        if (grid[i].every(cell => cell !== null)) fullRows.push(i);
+        let colFull = true;
+        for(let j=0; j<GRID_SIZE; j++) if(!grid[j][i]) colFull = false;
+        if(colFull) fullCols.push(i);
+    }
+
+    const total = fullRows.length + fullCols.length;
+    if(total > 0) {
+        combo++;
+        score += total * 100 * combo;
+        shake = 15;
+        vibrate(total > 1 ? [40, 30, 40] : 40);
+        
+        // Particles & Clear
+        fullRows.forEach(r => {
+            for(let c=0; c<GRID_SIZE; c++) {
+                createExplosion(view.x + c*view.cellSize, view.y + r*view.cellSize, grid[r][c]);
+                grid[r][c] = null;
+            }
+        });
+        fullCols.forEach(c => {
+            for(let r=0; r<GRID_SIZE; r++) {
+                if(grid[r][c]) {
+                    createExplosion(view.x + c*view.cellSize, view.y + r*view.cellSize, grid[r][c]);
+                    grid[r][c] = null;
+                }
+            }
+        });
+        showComboNotice(total);
+        playSfx(200 + combo*100);
+    } else {
+        combo = 0;
+    }
+}
+
+/**
+ * RENDERING (ANIMATIONS)
+ */
+function loop() {
+    ctx.fillStyle = SKINS[currentSkin].bg;
+    ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+    ctx.save();
+    if(shake > 0) {
+        ctx.translate(Math.random()*shake - shake/2, Math.random()*shake - shake/2);
+        shake *= 0.9;
+    }
+
+    drawGrid();
+    drawHand();
+    drawParticles();
+    ctx.restore();
+
+    document.getElementById('scoreLabel').innerText = score;
+    document.getElementById('scoreLabel').style.transform = `scale(${1 + combo*0.05})`;
+    
+    requestAnimationFrame(loop);
+}
+
+function drawGrid() {
+    const skin = SKINS[currentSkin];
+    ctx.fillStyle = "rgba(255,255,255,0.03)";
+    ctx.roundRect(view.x - 10, view.y - 10, view.size + 20, view.size + 20, 20);
+    ctx.fill();
+
+    for(let r=0; r<GRID_SIZE; r++) {
+        for(let c=0; c<GRID_SIZE; c++) {
+            const x = view.x + c * view.cellSize;
+            const y = view.y + r * view.cellSize;
+            
+            ctx.strokeStyle = "rgba(255,255,255,0.05)";
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x + skin.gap, y + skin.gap, view.cellSize - skin.gap*2, view.cellSize - skin.gap*2);
+
+            if(grid[r][c]) {
+                drawBlock(x, y, view.cellSize, grid[r][c], 1);
+            }
+        }
+    }
+
+    // Ghost Preview
+    if(dragging) {
+        const pos = getGridPos(mouse.x, mouse.y - 100, dragging.m);
+        if(canFit(dragging.m, pos.r, pos.c)) {
+            ctx.globalAlpha = 0.3;
+            dragging.m.forEach((row, r) => row.forEach((v, c) => {
+                if(v) drawBlock(view.x + (pos.c + c)*view.cellSize, view.y + (pos.r + r)*view.cellSize, view.cellSize, dragging.color, 1);
+            }));
+            ctx.globalAlpha = 1.0;
+        }
+    }
+}
+
+function drawBlock(x, y, size, color, scale = 1) {
+    const skin = SKINS[currentSkin];
+    const s = size * scale;
+    const offset = (size - s) / 2;
+    const p = skin.gap;
+
+    ctx.fillStyle = color;
+    if(currentSkin === 'neon') {
+        ctx.shadowBlur = 15; ctx.shadowColor = color;
+    }
+    
+    ctx.beginPath();
+    ctx.roundRect(x + offset + p, y + offset + p, s - p*2, s - p*2, skin.radius);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Highlights
+    ctx.fillStyle = 'rgba(255,255,255,0.2)';
+    ctx.fillRect(x + offset + p + 5, y + offset + p + 5, (s-p*2)/3, 3);
+}
+
+function drawHand() {
+    hand.forEach(item => {
+        if(!item.active) return;
+        
+        // Плавная анимация следования
+        if(dragging === item) {
+            item.x += (mouse.x - item.x) * 0.3;
+            item.y += (mouse.y - 100 - item.y) * 0.3;
+            item.scale += (1.0 - item.scale) * 0.2;
+        } else {
+            item.scale += (0.5 - item.scale) * 0.1;
+        }
+
+        const bSize = view.cellSize * item.scale;
+        const w = item.m[0].length * bSize;
+        const h = item.m.length * bSize;
+
+        item.m.forEach((row, r) => row.forEach((v, c) => {
+            if(v) drawBlock(item.x + c*bSize - w/2, item.y + r*bSize - h/2, bSize, item.color, 0.9);
+        }));
+    });
+}
+
+/**
+ * INTERACTION
+ */
+function handleStart(e) {
+    if(!isGameActive) return;
+    const pos = getEventPos(e);
+    mouse.x = pos.x; mouse.y = pos.y;
+
+    hand.forEach(item => {
+        if(!item.active) return;
+        const dist = Math.hypot(item.x - mouse.x, item.y - mouse.y);
+        if(dist < 60) {
+            dragging = item;
+            vibrate(20);
+            playSfx(400);
+        }
+    });
+}
+
+function handleMove(e) {
+    const pos = getEventPos(e);
+    mouse.x = pos.x; mouse.y = pos.y;
+}
+
+function handleEnd() {
+    if(!dragging) return;
+    
+    const pos = getGridPos(mouse.x, mouse.y - 100, dragging.m);
+    if(canFit(dragging.m, pos.r, pos.c)) {
+        dragging.m.forEach((row, r) => row.forEach((v, c) => {
+            if(v) grid[pos.r + r][pos.c + c] = dragging.color;
+        }));
+        dragging.active = false;
+        score += 20;
+        vibrate(30);
+        checkLines();
+        
+        if(hand.every(i => !i.active)) spawnHand();
+        else if (checkGameOver()) endGame();
+    } else {
+        // Return animation
+        const index = hand.indexOf(dragging);
+        dragging.x = (window.innerWidth / 4) * (index + 1);
+        dragging.y = window.innerHeight - 120;
+    }
+    dragging = null;
+}
+
+/**
+ * HELPERS
+ */
+function canFit(m, r, c) {
+    if(r < 0 || c < 0 || r + m.length > GRID_SIZE || c + m[0].length > GRID_SIZE) return false;
+    for(let i=0; i<m.length; i++) {
+        for(let j=0; j<m[0].length; j++) {
+            if(m[i][j] && grid[r+i][c+j]) return false;
+        }
+    }
+    return true;
+}
+
+function getGridPos(x, y, m) {
+    const w = m[0].length * view.cellSize;
+    const h = m.length * view.cellSize;
+    return {
+        r: Math.round((y - h/2 - view.y) / view.cellSize),
+        c: Math.round((x - w/2 - view.x) / view.cellSize)
+    };
+}
+
+function checkGameOver() {
+    return !hand.some(item => {
+        if(!item.active) return false;
+        for(let r=0; r<=GRID_SIZE-item.m.length; r++) {
+            for(let c=0; c<=GRID_SIZE-item.m[0].length; c++) {
+                if(canFit(item.m, r, c)) return true;
+            }
+        }
+        return false;
+    });
+}
+
+function createExplosion(x, y, color) {
+    for(let i=0; i<8; i++) {
+        particles.push({
+            x: x + view.cellSize/2, y: y + view.cellSize/2,
+            vx: (Math.random()-0.5)*10, vy: (Math.random()-0.5)*10,
+            life: 1.0, color: color, size: Math.random()*5 + 2
+        });
+    }
+}
+
+function drawParticles() {
+    particles.forEach((p, i) => {
+        p.x += p.vx; p.y += p.vy; p.vy += 0.2; p.life -= 0.02;
+        ctx.globalAlpha = p.life;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+        ctx.fill();
+        if(p.life <= 0) particles.splice(i, 1);
+    });
+    ctx.globalAlpha = 1;
+}
+
+function showComboNotice(lines) {
+    const el = document.getElementById('comboNotice');
+    const texts = ["GOOD!", "AMAZING!", "UNSTOPPABLE!", "GODLIKE!"];
+    el.innerText = texts[Math.min(lines-1, 3)];
+    el.style.opacity = 1;
+    el.style.transform = "translate(-50%, -50%) scale(1.5)";
+    setTimeout(() => { 
+        el.style.opacity = 0; 
+        el.style.transform = "translate(-50%, -80%) scale(1)";
+    }, 600);
+}
+
+function setSkin(type, btn) {
+    currentSkin = type;
+    document.querySelectorAll('.skin-item').forEach(i => i.classList.remove('active'));
+    btn.classList.add('active');
+    document.documentElement.style.setProperty('--accent', SKINS[type].accent);
+    document.documentElement.style.setProperty('--bg', SKINS[type].bg);
+    vibrate(10);
+}
+
+function startGame() {
+    score = 0; combo = 0; resetGrid();
+    isGameActive = true;
+    document.getElementById('uiMenu').style.opacity = 0;
+    setTimeout(() => document.getElementById('uiMenu').style.display = 'none', 300);
+    document.getElementById('uiGameOver').style.display = 'none';
+    spawnHand();
+}
+
+function endGame() {
+    isGameActive = false;
+    if(score > bestScore) {
+        bestScore = score;
+        localStorage.setItem('ultra_best', bestScore);
+        document.getElementById('bestScoreLabel').innerText = `BEST: ${bestScore}`;
+    }
+    document.getElementById('finalScore').innerText = score;
+    document.getElementById('uiGameOver').style.display = 'flex';
+}
+
+function vibrate(ms) { if(navigator.vibrate) navigator.vibrate(ms); }
+
+function getEventPos(e) {
+    const t = e.touches ? e.touches[0] : e;
+    return { x: t.clientX, y: t.clientY };
+}
+
+function initAudio() {
+    if(audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.connect(audioCtx.destination);
+    masterGain.gain.value = 0.1;
+}
+
+function playSfx(freq) {
+    if(!audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(10, audioCtx.currentTime + 0.2);
+    g.gain.setValueAtTime(0.3, audioCtx.currentTime);
+    g.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.2);
+    osc.connect(g); g.connect(masterGain);
+    osc.start(); osc.stop(audioCtx.currentTime + 0.2);
+}
+
+// Listeners
+canvas.addEventListener('touchstart', e => { e.preventDefault(); handleStart(e); }, {passive:false});
+canvas.addEventListener('touchmove', e => { e.preventDefault(); handleMove(e); }, {passive:false});
+canvas.addEventListener('touchend', handleEnd);
+canvas.addEventListener('mousedown', handleStart);
+window.addEventListener('mousemove', handleMove);
+window.addEventListener('mouseup', handleEnd);
+
+init();
+</script>
+</body>
+</html>
